@@ -87,6 +87,11 @@
             <artifactId>staxmapper</artifactId>
         </dependency>
 
+        <dependency>
+            <groupId>org.projectodd.vdx</groupId>
+            <artifactId>vdx-core</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+        </dependency>
 
         <!-- Test Dependencies -->
         <dependency>

@@ -22,28 +22,41 @@
 
 package org.jboss.as.controller.persistence;
 
-import static org.jboss.as.controller.logging.ControllerLogger.ROOT_LOGGER;
-
 import java.io.BufferedInputStream;
 import java.io.Closeable;
 import java.io.File;
 import java.io.FileInputStream;
+import java.net.MalformedURLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import javax.xml.namespace.QName;
 import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 
-import org.jboss.as.controller.logging.ControllerLogger;
 import org.jboss.as.controller.PathAddress;
+import org.jboss.as.controller.logging.ControllerLogger;
+import org.jboss.as.controller.parsing.XMLStreamValidationException;
 import org.jboss.dmr.ModelNode;
 import org.jboss.staxmapper.XMLElementReader;
 import org.jboss.staxmapper.XMLElementWriter;
 import org.jboss.staxmapper.XMLMapper;
+import org.projectodd.vdx.core.ConditionalNamespacedElementStringifier;
+import org.projectodd.vdx.core.ErrorPrinter;
+import org.projectodd.vdx.core.ErrorType;
+import org.projectodd.vdx.core.Printer;
+import org.projectodd.vdx.core.Stringifier;
+import org.projectodd.vdx.core.ValidationError;
+
+import static org.jboss.as.controller.logging.ControllerLogger.ROOT_LOGGER;
 
 /**
  * A configuration persister which uses an XML file for backing storage.
@@ -127,11 +140,67 @@ public class XmlConfigurationPersister extends AbstractConfigurationPersister {
             } finally {
                 safeClose(fis);
             }
+        } catch (XMLStreamException e) {
+            final boolean reported = reportValidationError(e);
+            throw ControllerLogger.ROOT_LOGGER.failedToParseConfiguration(reported ? null : e.getNestedException());
         } catch (Exception e) {
             throw ControllerLogger.ROOT_LOGGER.failedToParseConfiguration(e);
         }
         return updates;
     }
+
+    private boolean reportValidationError(final XMLStreamException exception) {
+        final ValidationError error;
+        if (exception instanceof XMLStreamValidationException) {
+            error = ((XMLStreamValidationException)exception).getValidationError();
+        } else {
+            error = ValidationError.from(exception, ErrorType.UNKNOWN_ERROR);
+            final Matcher m = Pattern.compile("Message: (.*)").matcher(exception.getMessage());
+            if (m.find()) {
+                error.fallbackMessage(m.group(1));
+            }
+        }
+        boolean schemasAvailable = false;
+
+        try {
+            final String jbossHome = System.getProperty("jboss.home.dir");
+            if (jbossHome != null) {
+                final File dir = new File(jbossHome, "docs/schema");
+                final File[] schemaFiles = dir.listFiles();
+                if (dir.exists() && schemaFiles != null) {
+                    schemasAvailable = true;
+                    List<Stringifier> stringifiers = new ArrayList<>();
+                    stringifiers.add(new ConditionalNamespacedElementStringifier(x -> x.name().equals("subsystem")));
+
+                    new ErrorPrinter(this.fileName.toURI().toURL(),
+                                     Arrays.stream(schemaFiles)
+                                             .filter(f -> f.getName().endsWith(".xsd"))
+                                             .map(f -> {
+                                                 try {
+                                                     return f.toURI().toURL();
+                                                 } catch (MalformedURLException ex) {
+                                                     throw new RuntimeException(ex);
+                                                 }
+                                             })
+                                             .collect(Collectors.toList()),
+                                     new Printer() {
+                                         @Override
+                                         public void println(String msg) {
+                                             ControllerLogger.ROOT_LOGGER.error("\n" + msg);
+                                         }
+                                     },
+                                     stringifiers)
+                            .print(error);
+                }
+            }
+        } catch (Exception ex) {
+            schemasAvailable = false;
+            ControllerLogger.ROOT_LOGGER.error("Failed to pretty print validation error", ex);
+        }
+
+        return schemasAvailable;
+    }
+
 
     private static void safeClose(final Closeable closeable) {
         if (closeable != null) try {
